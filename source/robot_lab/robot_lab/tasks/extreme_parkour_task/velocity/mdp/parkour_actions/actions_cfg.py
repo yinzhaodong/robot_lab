@@ -14,3 +14,5 @@ class DelayedJointPositionActionCfg(JointPositionActionCfg):
     history_length: int = 8
     action_delay_steps: list[int]| int = [1, 1]
     use_delay: bool = False 
+    randomize_action_latency: bool = False
+    latency_range: tuple[float, float] = (0.0, 0.0)

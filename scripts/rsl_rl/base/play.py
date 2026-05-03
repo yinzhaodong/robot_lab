@@ -18,7 +18,6 @@ import os
 import sys
 
 from isaaclab.app import AppLauncher
-from isaaclab.utils.dict import print_dict
 # from isaaclab.managers import SceneEntityCfg
 
 # import json
@@ -44,6 +43,7 @@ parser.add_argument(
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--keyboard", action="store_true", default=False, help="Whether to use keyboard.")
 parser.add_argument("--se2_gamepad", action="store_true", default=False, help="Whether to use se2_gamepad.")
+parser.add_argument("--play_lin_vel_x", type=float, default=0.5, help="Fixed forward x velocity command for play mode.")
 parser.add_argument("--debug", action="store_true", default=False, help="Print debug information (env config, action and observation spaces).")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point.")
 parser.add_argument("--moe", action="store_true", default=False, help="Whether to use MoE.")
@@ -78,7 +78,10 @@ from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+try:
+    from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+except ModuleNotFoundError:
+    get_published_pretrained_checkpoint = None
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 from isaaclab.devices.keyboard.se2_keyboard import Se2KeyboardCfg 
@@ -158,11 +161,27 @@ class _MoEActor(nn.Module):
         return out
 
 # -------- Policy that reuses ALL rsl-rl logic and just swaps the actor --------
+# RSL-RL 5.x removed rsl_rl.modules.actor_critic. Standard PPO configs do not
+# use these legacy custom policies, so keep this file importable and fail only if
+# ActorCriticMoE is explicitly selected.
 try:
     from rsl_rl.modules.actor_critic import ActorCritic as _BaseActorCritic
-except Exception:
-    import rsl_rl.modules.actor_critic as _ac_mod
-    _BaseActorCritic = _ac_mod.ActorCritic
+except ModuleNotFoundError:
+    import types
+    import rsl_rl.modules as _rsl_modules
+
+    class _UnavailableActorCritic(nn.Module):
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "ActorCriticMoE requires the old RSL-RL ActorCritic API. "
+                "Current rsl-rl-lib uses the newer actor/critic MLPModel API."
+            )
+
+    _ac_mod = types.ModuleType("rsl_rl.modules.actor_critic")
+    setattr(_ac_mod, "ActorCritic", _UnavailableActorCritic)
+    sys.modules["rsl_rl.modules.actor_critic"] = _ac_mod
+    setattr(_rsl_modules, "actor_critic", _ac_mod)
+    _BaseActorCritic = _UnavailableActorCritic
 
 import torch
 import torch.nn as nn
@@ -299,6 +318,156 @@ def _print_root_and_target(env):
 
     print(msg, flush=True)
 
+
+def _convert_legacy_ppo_cfg_for_rsl_rl_5(train_cfg: dict) -> dict:
+    """Convert IsaacLab's legacy PPO policy config to the RSL-RL 5.x actor/critic layout."""
+    if "actor" in train_cfg or "policy" not in train_cfg:
+        return train_cfg
+
+    policy_cfg = dict(train_cfg["policy"])
+
+    def _is_missing(value) -> bool:
+        return value is None or value == "???" or type(value).__name__ == "_MISSING_TYPE"
+
+    def _get(name: str, default):
+        value = policy_cfg.get(name, default)
+        return default if _is_missing(value) else value
+
+    policy_class_name = _get("class_name", "ActorCritic")
+    model_class_name = "RNNModel" if "Recurrent" in policy_class_name else "MLPModel"
+    obs_normalization = bool(train_cfg.get("empirical_normalization", False))
+    actor_obs_normalization = bool(_get("actor_obs_normalization", obs_normalization))
+    critic_obs_normalization = bool(_get("critic_obs_normalization", obs_normalization))
+
+    distribution_class_name = (
+        "HeteroscedasticGaussianDistribution"
+        if bool(_get("state_dependent_std", False))
+        else "GaussianDistribution"
+    )
+    distribution_cfg = {
+        "class_name": distribution_class_name,
+        "init_std": float(_get("init_noise_std", 1.0)),
+        "std_type": _get("noise_std_type", "scalar"),
+    }
+
+    shared_model_cfg = {
+        "class_name": model_class_name,
+        "activation": _get("activation", "elu"),
+    }
+    if model_class_name == "RNNModel":
+        shared_model_cfg.update(
+            {
+                "rnn_type": _get("rnn_type", "lstm"),
+                "rnn_hidden_dim": int(_get("rnn_hidden_dim", 256)),
+                "rnn_num_layers": int(_get("rnn_num_layers", 1)),
+            }
+        )
+
+    train_cfg["actor"] = {
+        **shared_model_cfg,
+        "hidden_dims": _get("actor_hidden_dims", [256, 256, 256]),
+        "obs_normalization": actor_obs_normalization,
+        "distribution_cfg": distribution_cfg,
+    }
+    train_cfg["critic"] = {
+        **shared_model_cfg,
+        "hidden_dims": _get("critic_hidden_dims", [256, 256, 256]),
+        "obs_normalization": critic_obs_normalization,
+    }
+    train_cfg.setdefault("obs_groups", {})
+    return train_cfg
+
+
+def _fill_default_obs_groups_for_rsl_rl_5(train_cfg: dict, env) -> dict:
+    """Set explicit actor/critic observation groups for RSL-RL 5.x when legacy configs omit them."""
+    obs_groups = train_cfg.setdefault("obs_groups", {})
+    if "actor" in obs_groups and "critic" in obs_groups:
+        return train_cfg
+
+    obs_keys = set(env.get_observations().keys())
+    if "actor" not in obs_groups:
+        if "policy" in obs_keys:
+            obs_groups["actor"] = ["policy"]
+        elif "actor" in obs_keys:
+            obs_groups["actor"] = ["actor"]
+    if "critic" not in obs_groups:
+        if "critic" in obs_keys:
+            obs_groups["critic"] = ["critic"]
+        elif "policy" in obs_keys:
+            obs_groups["critic"] = ["policy"]
+    return train_cfg
+
+
+def _legacy_actor_state_for_rsl_rl_5(loaded_dict: dict, target_state: dict) -> dict:
+    """Best-effort conversion of old ActorCritic checkpoints to RSL-RL 5.x actor keys."""
+    source_state = None
+    for key in ("actor_state_dict", "model_state_dict", "policy_state_dict", "actor_critic_state_dict"):
+        if key in loaded_dict:
+            source_state = loaded_dict[key]
+            break
+    if source_state is None:
+        raise KeyError(
+            "Checkpoint does not contain actor_state_dict or a known legacy policy state dict "
+            f"(available keys: {list(loaded_dict.keys())})"
+        )
+
+    converted = {}
+    for old_key, value in source_state.items():
+        key = old_key.removeprefix("module.")
+        candidates = [key]
+
+        if key.startswith("actor."):
+            suffix = key[len("actor.") :]
+            candidates.extend((f"mlp.{suffix}", suffix))
+        elif key.startswith("actor_mlp."):
+            suffix = key[len("actor_mlp.") :]
+            candidates.extend((f"mlp.{suffix}", suffix))
+        elif key.startswith("actor_obs_normalizer."):
+            suffix = key[len("actor_obs_normalizer.") :]
+            candidates.append(f"obs_normalizer.{suffix}")
+        elif key == "std":
+            candidates.append("distribution.std_param")
+        elif key == "log_std":
+            candidates.append("distribution.log_std_param")
+
+        for candidate in candidates:
+            if candidate in target_state and target_state[candidate].shape == value.shape:
+                converted[candidate] = value
+                break
+
+    if not converted:
+        raise RuntimeError(
+            "Could not map any checkpoint tensor to the current RSL-RL 5.x actor. "
+            "The checkpoint may come from a different observation/action network architecture."
+        )
+    return converted
+
+
+def _load_runner_checkpoint_for_play(runner, resume_path: str, device: str):
+    """Load checkpoints for inference, supporting both RSL-RL 5.x and older ActorCritic saves."""
+    loaded_dict = torch.load(resume_path, weights_only=False, map_location=device)
+
+    if "actor_state_dict" in loaded_dict:
+        # For play only the actor is required; skip critic/optimizer to avoid unnecessary format mismatches.
+        runner.load(
+            resume_path,
+            load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": False, "rnd": False},
+            strict=False,
+            map_location=device,
+        )
+        return loaded_dict
+
+    actor_state = _legacy_actor_state_for_rsl_rl_5(loaded_dict, runner.alg.actor.state_dict())
+    missing, unexpected = runner.alg.actor.load_state_dict(actor_state, strict=False)
+    print(
+        "[INFO] Loaded legacy checkpoint actor for play "
+        f"({len(actor_state)} tensors, missing={len(missing)}, unexpected={len(unexpected)})."
+    )
+    if len(missing) > 0:
+        print(f"[INFO] Missing actor keys ignored for play: {list(missing)[:8]}")
+    return loaded_dict
+
+
 def main():
     """Play with RSL-RL agent."""
     # parse configuration
@@ -356,6 +525,16 @@ def main():
     env_cfg.events.randomize_push_robot = None
     env_cfg.curriculum.terrain_levels = None
     env_cfg.curriculum.command_levels = None
+
+    # For visual evaluation, use a fixed forward-only command by default.
+    env_cfg.commands.base_velocity.heading_command = False
+    env_cfg.commands.base_velocity.rel_standing_envs = 0.0
+    env_cfg.commands.base_velocity.rel_heading_envs = 0.0
+    env_cfg.commands.base_velocity.ranges.lin_vel_x = (args_cli.play_lin_vel_x, args_cli.play_lin_vel_x)
+    env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+    env_cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+    env_cfg.commands.base_velocity.ranges.heading = (0.0, 0.0)
+    env_cfg.commands.base_velocity.resampling_time_range = (1.0e9, 1.0e9)
 
     if args_cli.keyboard:
         env_cfg.scene.num_envs = 1
@@ -422,11 +601,16 @@ def main():
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     if args_cli.use_pretrained_checkpoint:
+        if get_published_pretrained_checkpoint is None:
+            raise RuntimeError(
+                "This IsaacLab version does not provide published checkpoint lookup. "
+                "Use --load_run/--checkpoint or pass a full --checkpoint path instead."
+            )
         resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
         if not resume_path:
             print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
             return
-    elif args_cli.checkpoint:
+    elif args_cli.checkpoint and (os.path.isabs(args_cli.checkpoint) or os.path.dirname(args_cli.checkpoint)):
         resume_path = retrieve_file_path(args_cli.checkpoint)
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -454,6 +638,8 @@ def main():
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    play_cfg = _convert_legacy_ppo_cfg_for_rsl_rl_5(agent_cfg.to_dict())
+    play_cfg = _fill_default_obs_groups_for_rsl_rl_5(play_cfg, env)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
@@ -465,38 +651,45 @@ def main():
         from robot_lab.tasks.locomotion.velocity.config.quadruped.Arcdog_adjustable_leg.agents.symmetric_ppo import SymmetricOnPolicyRunner
         runner = SymmetricOnPolicyRunner(
             env, 
-            agent_cfg.to_dict(), 
+            play_cfg, 
             log_dir=None, 
             device=agent_cfg.device,
             config=env_cfg  # 传入自定义需要的 config 参数
         )
     elif agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = OnPolicyRunner(env, play_cfg, log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = DistillationRunner(env, play_cfg, log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     # =========================================================================
     
-    runner.load(resume_path)
+    _load_runner_checkpoint_for_play(runner, resume_path, agent_cfg.device)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
-    # extract the neural network module
-    # we do this in a try-except to maintain backwards compatibility.
-    try:
-        # version 2.3 onwards
+    # Extract the neural network module across RSL-RL versions.
+    if hasattr(runner.alg, "get_policy"):
+        policy_nn = runner.alg.get_policy()
+    elif hasattr(runner.alg, "actor"):
+        policy_nn = runner.alg.actor
+    elif hasattr(runner.alg, "policy"):
         policy_nn = runner.alg.policy
-    except AttributeError:
-        # version 2.2 and below
+    elif hasattr(runner.alg, "actor_critic"):
         policy_nn = runner.alg.actor_critic
+    else:
+        policy_nn = None
 
     # extract the normalizer
-    if hasattr(policy_nn, "actor_obs_normalizer"):
+    if policy_nn is None:
+        normalizer = None
+    elif hasattr(policy_nn, "actor_obs_normalizer"):
         normalizer = policy_nn.actor_obs_normalizer
     elif hasattr(policy_nn, "student_obs_normalizer"):
         normalizer = policy_nn.student_obs_normalizer
+    elif hasattr(policy_nn, "obs_normalizer"):
+        normalizer = policy_nn.obs_normalizer
     else:
         normalizer = None
 
@@ -517,10 +710,14 @@ def main():
                         except Exception:
                             pass
 
-    # 对策略网络做去参数化
-    _deparametrize_all(policy_nn)
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx", verbose=True)
+    # Export is useful but should not block play across RSL-RL API/checkpoint formats.
+    if policy_nn is not None:
+        try:
+            _deparametrize_all(policy_nn)
+            export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+            export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx", verbose=True)
+        except Exception as exc:
+            print(f"[WARN] Policy export skipped: {exc}")
 
     dt = env.unwrapped.step_dt
 

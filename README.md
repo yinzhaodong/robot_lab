@@ -48,7 +48,13 @@ python -c "import isaaclab, robot_lab; print('robot_lab ready')"
 python scripts/tools/list_envs.py
 ```
 
-## Training Scripts
+## Arcdog Bodyflat Task
+
+This repository currently documents only this verified stretch-leg task:
+
+```text
+RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0
+```
 
 All commands below are meant to be run from the repository root:
 
@@ -57,123 +63,69 @@ cd ~/code/robot_lab
 conda activate dog
 ```
 
-### Arcdog Adjustable Leg Bodyflat
-
-This is the currently verified stretch-leg training task.
+### Train
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
   --headless \
-  --num_envs=16 \
-  --max_iterations=12000
+  --num_envs=6 \
+  --max_iterations=20000 \
+  --run_name=rew
 ```
 
-Quick smoke test:
+The Bodyflat task enables MGDP-style randomized action latency for sim-to-real.
+The default range is `0.0` to `0.02` seconds, configured in:
+
+```text
+source/robot_lab/robot_lab/tasks/locomotion/velocity/config/quadruped/Arcdog_adjustable_leg/bodyflat_env_cfg.py
+```
+
+Relevant parameters:
+
+```python
+use_delay=True
+randomize_action_latency=True
+latency_range=(0.0, 0.02)
+```
+
+
+### Resume
+
+Resume uses the run folder under `logs/rsl_rl/arclab_arcdog_adjustable_leg_bodyflat/`.
+Only pass the run folder name to `--load_run`, not the full path.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
+CUDA_VISIBLE_DEVICES=5 python scripts/rsl_rl/base/train.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
   --headless \
-  --num_envs=4 \
-  --max_iterations=1
-```
-
-Other registered Arcdog adjustable-leg tasks:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
-  --task=RobotLab-Isaac-Velocity-Flat-ArcdogAdjustableLeg-v0 \
-  --headless \
-  --num_envs=16 \
-  --max_iterations=12000
-```
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
-  --task=RobotLab-Isaac-Velocity-Rough-ArcdogAdjustableLeg-v0 \
-  --headless \
-  --num_envs=16 \
-  --max_iterations=12000
-```
-
-### G1 Inspire Manipulation
-
-Use the same command style for the G1 Inspire manipulation training entry point:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/g1_inspire_manip/train.py \
-  --task=G1_Inspire_TS1 \
-  --headless \
-  --num_envs=16 \
-  --max_iterations=12000
-```
-
-For a quick run:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/g1_inspire_manip/train.py \
-  --task=G1_Inspire_TS1 \
-  --headless \
-  --num_envs=4 \
-  --max_iterations=1
-```
-
-## Useful Options
-
-```bash
-# Record video during training.
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
-  --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
-  --headless \
-  --video \
-  --video_length=200 \
-  --video_interval=2000 \
-  --num_envs=16 \
-  --max_iterations=12000
-```
-
-```bash
-# Resume from an existing run.
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
-  --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
-  --headless \
+  --num_envs=4096 \
+  --max_iterations=20000 \
   --resume \
-  --load_run=<RUN_FOLDER_NAME> \
-  --checkpoint=<CHECKPOINT_NAME>
+  --load_run=2026-05-03_12-06-26_rew \
+  --checkpoint=model_1000.pt \
+  --run_name=rew_resume
 ```
+
+### Play
+
+Play uses the same log root:
 
 ```bash
-# Debug observation and action layout.
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
+CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/play.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
-  --headless \
-  --num_envs=4 \
-  --max_iterations=1 \
-  --debug
+  --num_envs=16 \
+  --play_lin_vel_x=0.5 \
+  --load_run=2026-05-03_12-09-41_new \
+  --checkpoint=model_2000.pt
 ```
 
-## Logs
 
-RSL-RL logs are written under:
-
-```text
-logs/rsl_rl/<experiment_name>/<timestamp>/
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/play.py \
+  --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
+  --num_envs=16 \
+  --play_lin_vel_x=0.9 \
+  --checkpoint=logs/rsl_rl/arclab_arcdog_adjustable_leg_bodyflat/2026-05-03_11-06-34_raw/model_4600.pt
 ```
 
-For the bodyflat Arcdog task, the default experiment directory is:
-
-```text
-logs/rsl_rl/arclab_arcdog_adjustable_leg_bodyflat/
-```
-
-## Notes
-
-- Isaac Sim warnings such as `IOMMU is enabled`, CPU powersave warnings, and
-  `FabricManager::initializePointInstancer mismatched prototypes` are usually
-  simulator warnings, not training failures.
-- The local `scripts/rsl_rl/base/train.py` has compatibility handling for
-  `rsl-rl-lib==5.0.1`, where PPO uses separate `actor` and `critic` model
-  configs instead of the older single `policy` / `ActorCritic` API.
-- Keep this repository outside the Isaac Lab repository, then install it with
-  `python -m pip install -e source/robot_lab`.

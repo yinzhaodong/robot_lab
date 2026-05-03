@@ -6,8 +6,11 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 import robot_lab.tasks.locomotion.velocity.mdp as mdp
 from robot_lab.tasks.locomotion.velocity.velocity_env_cfg import (
-    LocomotionVelocityRoughEnvCfg, RewardsCfg,
+    ActionsCfg,
+    LocomotionVelocityRoughEnvCfg,
+    RewardsCfg,
 )
+from robot_lab.tasks.extreme_parkour_task.velocity.mdp.parkour_actions import DelayedJointPositionActionCfg
 
 ##
 # Pre-defined configs
@@ -17,6 +20,26 @@ from robot_lab.tasks.locomotion.velocity.velocity_env_cfg import (
 # use local assets
 from robot_lab.assets.arclab import ARCLAB_ARCDOG_ADJUSTABLE_LEG_CFG  # isort: skip
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort:skip
+
+
+@configclass
+class ArcdogAdjustableLegActionsCfg(ActionsCfg):
+    """Action terms with MGDP-style randomized action latency for sim-to-real."""
+
+    joint_pos = DelayedJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=[".*"],
+        scale=0.5,
+        use_default_offset=True,
+        preserve_order=True,
+        clip=None,
+        use_delay=False,
+        randomize_action_latency=True,
+        latency_range=(0.0, 0.02),
+        history_length=4,
+        action_delay_steps=0,
+        delay_update_global_steps=24 * 8000,
+    )
 
 
 @configclass
@@ -203,6 +226,7 @@ class ArcdogAdjustableLegRewardsCfg(RewardsCfg):
 
 @configclass
 class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
+    actions: ArcdogAdjustableLegActionsCfg = ArcdogAdjustableLegActionsCfg()
     rewards: ArcdogAdjustableLegRewardsCfg = ArcdogAdjustableLegRewardsCfg()
 
 
@@ -342,8 +366,8 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Order: MGDP rewards, extra Arcdog rewards, then disabled rewards.
         reward_weights = {
             # MGDP stage1 rewards.
-            "track_lin_vel_xy_exp": 1.0,        # tracking_lin_vel
-            "track_ang_vel_z_exp": 0.5,         # tracking_ang_vel
+            "track_lin_vel_xy_exp": 2.0,        # tracking_lin_vel
+            "track_ang_vel_z_exp": 1.0,         # tracking_ang_vel
             "lin_vel_z_l2": -1.0,               # lin_vel_z
             "ang_vel_xy_l2": -0.05,             # ang_vel_xy
             "flat_orientation_l2": -0.2,        # orientation
@@ -354,7 +378,7 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
             "undesired_contacts": -1.0,         # collision
             "feet_gait": -0.1,                  # motion_trot
             "feet_air_time": 1.0,
-            "feet_stumble": -1.0,
+            "feet_stumble": -1,
 
             # Extra Arcdog adjustable-leg/bodyflat rewards.
             "box_joint_vel_penalty": -0.01,
@@ -363,13 +387,15 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
             "box_joint_pos_penalty": 0,
             "joint_pos_limits": -0.05,
             "body_lin_acc_l2": -0.0,
+            "feet_height_exp": 1.5,
+
+            # Termination penalty.
+            "is_terminated": -20.0,
 
             # Explicitly disabled for this task.
-            "is_terminated": 0.0,
             "base_height_l2": 0.0,
             "stand_still_flat": 0.0,
             "joint_vel_l2": 0.0,
-            "feet_height_exp": 0.0,
             "feet_contact": 0.0,
             "feet_slide": 0.0,
             "joint_vel_limits": 0.0,
@@ -387,6 +413,9 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ------------------------------Terminations------------------------------
         self.terminations.illegal_contact.params["sensor_cfg"].body_names = [
             self.base_link_name,
+            self.trunk_link_name,
+            self.hip_link_name,
+            self.knee_link_name,
         ]
         # self.terminations.illegal_contact = None
         # ------------------------------Curriculums------------------------------
