@@ -180,11 +180,27 @@ class _MoEActor(nn.Module):
         return out
 
 # -------- Policy that reuses ALL rsl-rl logic and just swaps the actor --------
+# RSL-RL 5.x removed rsl_rl.modules.actor_critic. The standard configs below do
+# not use these legacy custom policies, so keep the file importable and fail only
+# if a legacy policy is explicitly selected.
 try:
     from rsl_rl.modules.actor_critic import ActorCritic as _BaseActorCritic
-except Exception:
-    import rsl_rl.modules.actor_critic as _ac_mod
-    _BaseActorCritic = _ac_mod.ActorCritic
+except ModuleNotFoundError:
+    import types
+    import rsl_rl.modules as _rsl_modules
+
+    class _UnavailableActorCritic(nn.Module):
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "ActorCriticMoE/ActorCriticSN require the old RSL-RL ActorCritic API. "
+                "Current rsl-rl-lib uses the newer actor/critic MLPModel API."
+            )
+
+    _ac_mod = types.ModuleType("rsl_rl.modules.actor_critic")
+    setattr(_ac_mod, "ActorCritic", _UnavailableActorCritic)
+    sys.modules["rsl_rl.modules.actor_critic"] = _ac_mod
+    setattr(_rsl_modules, "actor_critic", _ac_mod)
+    _BaseActorCritic = _UnavailableActorCritic
 
 import torch
 import torch.nn as nn
@@ -449,6 +465,85 @@ class ActorCriticSN(_BaseActorCritic):
 # 这样 eval("ActorCriticSN") 也能解析到这个类。
 # === End Add ===
 
+
+def _convert_legacy_ppo_cfg_for_rsl_rl_5(train_cfg: dict) -> dict:
+    """Convert IsaacLab's legacy PPO policy config to the RSL-RL 5.x actor/critic layout."""
+    if "actor" in train_cfg or "policy" not in train_cfg:
+        return train_cfg
+
+    policy_cfg = dict(train_cfg["policy"])
+
+    def _is_missing(value) -> bool:
+        return value is None or value == "???" or type(value).__name__ == "_MISSING_TYPE"
+
+    def _get(name: str, default):
+        value = policy_cfg.get(name, default)
+        return default if _is_missing(value) else value
+
+    policy_class_name = _get("class_name", "ActorCritic")
+    model_class_name = "RNNModel" if "Recurrent" in policy_class_name else "MLPModel"
+    obs_normalization = bool(train_cfg.get("empirical_normalization", False))
+    actor_obs_normalization = bool(_get("actor_obs_normalization", obs_normalization))
+    critic_obs_normalization = bool(_get("critic_obs_normalization", obs_normalization))
+
+    distribution_class_name = (
+        "HeteroscedasticGaussianDistribution"
+        if bool(_get("state_dependent_std", False))
+        else "GaussianDistribution"
+    )
+    distribution_cfg = {
+        "class_name": distribution_class_name,
+        "init_std": float(_get("init_noise_std", 1.0)),
+        "std_type": _get("noise_std_type", "scalar"),
+    }
+
+    shared_model_cfg = {
+        "class_name": model_class_name,
+        "activation": _get("activation", "elu"),
+    }
+    if model_class_name == "RNNModel":
+        shared_model_cfg.update(
+            {
+                "rnn_type": _get("rnn_type", "lstm"),
+                "rnn_hidden_dim": int(_get("rnn_hidden_dim", 256)),
+                "rnn_num_layers": int(_get("rnn_num_layers", 1)),
+            }
+        )
+
+    train_cfg["actor"] = {
+        **shared_model_cfg,
+        "hidden_dims": _get("actor_hidden_dims", [256, 256, 256]),
+        "obs_normalization": actor_obs_normalization,
+        "distribution_cfg": distribution_cfg,
+    }
+    train_cfg["critic"] = {
+        **shared_model_cfg,
+        "hidden_dims": _get("critic_hidden_dims", [256, 256, 256]),
+        "obs_normalization": critic_obs_normalization,
+    }
+    train_cfg.setdefault("obs_groups", {})
+    return train_cfg
+
+
+def _fill_default_obs_groups_for_rsl_rl_5(train_cfg: dict, env) -> dict:
+    """Set explicit actor/critic observation groups for RSL-RL 5.x when legacy configs omit them."""
+    obs_groups = train_cfg.setdefault("obs_groups", {})
+    if "actor" in obs_groups and "critic" in obs_groups:
+        return train_cfg
+
+    obs_keys = set(env.get_observations().keys())
+    if "actor" not in obs_groups:
+        if "policy" in obs_keys:
+            obs_groups["actor"] = ["policy"]
+        elif "actor" in obs_keys:
+            obs_groups["actor"] = ["actor"]
+    if "critic" not in obs_groups:
+        if "critic" in obs_keys:
+            obs_groups["critic"] = ["critic"]
+        elif "policy" in obs_keys:
+            obs_groups["critic"] = ["policy"]
+    return train_cfg
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -566,6 +661,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = CustomRecordVideo(env, **video_kwargs)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     # create runner from rsl-rl
+    train_cfg = _convert_legacy_ppo_cfg_for_rsl_rl_5(agent_cfg.to_dict())
+    train_cfg = _fill_default_obs_groups_for_rsl_rl_5(train_cfg, env)
     
     # =========================================================================
     # 🌟 修改点：动态切换 RunnerClass 
@@ -574,15 +671,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         from robot_lab.tasks.locomotion.velocity.config.quadruped.Arcdog_adjustable_leg.agents.symmetric_ppo import SymmetricOnPolicyRunner
         runner = SymmetricOnPolicyRunner(
             env, 
-            agent_cfg.to_dict(), 
+            train_cfg,
             config=env_cfg,       # <==== 补充缺失的 config 参数！
             log_dir=log_dir, 
             device=agent_cfg.device
         )
     elif agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = DistillationRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     # =========================================================================
@@ -683,8 +780,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
     # run training
-    ac = runner.alg.policy  # 某些版本也叫 runner.alg.actor_critic
-    # print(">> Actor type:", ac.actor.__class__.__name__)  # 期望看到 _MoEActor
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
     # Optional: Force commit
     try:
