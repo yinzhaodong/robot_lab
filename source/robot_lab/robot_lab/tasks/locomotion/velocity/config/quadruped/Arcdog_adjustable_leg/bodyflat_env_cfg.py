@@ -34,7 +34,7 @@ class ArcdogAdjustableLegRewardsCfg(RewardsCfg):
         },
     )
 
-    prismatic_joint_pos_penalty  = RewTerm(
+    box_joint_pos_penalty = RewTerm(
         func=mdp.joint_position_penalty,
         weight=0.0,
         params={
@@ -91,6 +91,112 @@ class ArcdogAdjustableLegRewardsCfg(RewardsCfg):
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*_box_joint"),
         },
+    )
+
+    # Keep the public reward name as "feet_gait", but use the MGDP-style
+    # motion_trot implementation: diagonal joint-pose symmetry penalty.
+    feet_gait = RewTerm(
+        func=mdp.motion_trot_joint_symmetry,
+        weight=0.0,
+        params={
+            "command_name": "base_velocity",
+            "command_threshold": 0.1,
+            "velocity_threshold": 0.1,
+            "stop_after_steps": None,
+            "asset_cfg": SceneEntityCfg("robot"),
+            "joint_group_pairs": (
+                (
+                    ("FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"),
+                    ("RR_hip_joint", "RR_thigh_joint", "RR_calf_joint"),
+                ),
+                (
+                    ("FR_hip_joint", "FR_thigh_joint", "FR_calf_joint"),
+                    ("RL_hip_joint", "RL_thigh_joint", "RL_calf_joint"),
+                ),
+            ),
+        },
+    )
+
+    # -------------------------------------------------------------------------
+    # MGDP stage1 reward candidates.
+    # Source reference:
+    # https://github.com/arclab-hku/MGDP/blob/master/legged_gym/legged_gym/envs/random_dog/random_dog_config_stage1.py
+    #
+    # These terms mirror the MGDP reward names and are disabled by default
+    # (weight = 0.0). Enable them in EnvCfg.__post_init__ only when you want to
+    # test a specific MGDP-style reward. Most of them duplicate existing rewards,
+    # so avoid enabling both the original term and its mgdp_* alias unless you
+    # intentionally want double counting.
+    # -------------------------------------------------------------------------
+    mgdp_tracking_lin_vel = RewTerm(
+        func=mdp.track_lin_vel_xy_exp,
+        weight=0.0,
+        params={"command_name": "base_velocity", "std": 0.5},
+    )
+    mgdp_tracking_ang_vel = RewTerm(
+        func=mdp.track_ang_vel_z_exp,
+        weight=0.0,
+        params={"command_name": "base_velocity", "std": 0.5},
+    )
+    mgdp_lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=0.0)
+    mgdp_ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=0.0)
+    mgdp_torques = RewTerm(
+        func=mdp.joint_torques_l2,
+        weight=0.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+    )
+    mgdp_dof_acc = RewTerm(
+        func=mdp.joint_acc_l2,
+        weight=0.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+    )
+    mgdp_action_rate = RewTerm(func=mdp.action_rate_l2, weight=0.0)
+    mgdp_orientation = RewTerm(func=mdp.flat_orientation_l2, weight=0.0)
+    mgdp_collision = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=0.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=""), "threshold": 1.0},
+    )
+    mgdp_motion_trot = RewTerm(
+        func=mdp.motion_trot_joint_symmetry,
+        weight=0.0,
+        params={
+            "command_name": "base_velocity",
+            "command_threshold": 0.1,
+            "velocity_threshold": 0.1,
+            "stop_after_steps": None,
+            "asset_cfg": SceneEntityCfg("robot"),
+            "joint_group_pairs": (
+                (
+                    ("FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"),
+                    ("RR_hip_joint", "RR_thigh_joint", "RR_calf_joint"),
+                ),
+                (
+                    ("FR_hip_joint", "FR_thigh_joint", "FR_calf_joint"),
+                    ("RL_hip_joint", "RL_thigh_joint", "RL_calf_joint"),
+                ),
+            ),
+        },
+    )
+    mgdp_feet_air_time = RewTerm(
+        func=mdp.feet_air_time,
+        weight=0.0,
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=""),
+            "threshold": 0.5,
+            "command_threshold": 0.25,
+        },
+    )
+    mgdp_feet_stumble = RewTerm(
+        func=mdp.feet_stumble,
+        weight=0.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="")},
+    )
+    mgdp_stand_still = RewTerm(
+        func=mdp.stand_still_without_cmd,
+        weight=0.0,
+        params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
     )
 
 
@@ -184,109 +290,96 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.events.randomize_screw_joints.params["asset_cfg"].joint_names = [".*_box_joint"]
 
         # ------------------------------Rewards------------------------------
-        # General
-        self.rewards.is_terminated.weight = -20
-
-        # Root penalties
-        self.rewards.lin_vel_z_l2.weight = -0.3
-        self.rewards.ang_vel_xy_l2.weight = -0.2
-        self.rewards.flat_orientation_l2.weight = -5.0
-        self.rewards.base_height_l2.weight = -3
+        # Reward params. Final weights are set in reward_weights below.
         self.rewards.base_height_l2.params["target_height"] = 0.44
-        # 设置静止水平奖励的权重
-        # 这是一个正向奖励(Bonus)，所以权重为正。
-        # 建议值: 0.5 ~ 2.0。如果机器人在坡上静止时还是歪的，可以调大这个值。
-        self.rewards.stand_still_flat.weight = 3.0 
         self.rewards.base_height_l2.params["asset_cfg"].body_names = [
             self.base_link_name
         ]
-        self.rewards.body_lin_acc_l2.weight = -0.01
         self.rewards.body_lin_acc_l2.params["asset_cfg"].body_names = [
             self.base_link_name
         ]
 
-        # Joint penaltie
-        # self.rewards.joint_torques_l2.weight = -2.5e-6
-        # 测试 暂时取消此惩罚
-        self.rewards.joint_vel_l2.weight = -0.005
-        self.rewards.box_joint_vel_penalty.weight = -0.01 
-        self.rewards.joint_acc_l2.weight = -1.0e-7
-        self.rewards.box_joint_acc_penalty.weight = -1.0e-5 # 伸缩关节的加速度惩罚，建议比全局高 1-2 个数量级 
-        self.rewards.joint_pos_limits.weight = -0.05
+        # Joint penalty params.
         self.rewards.joint_pos_limits.params["asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=".*_(hip|thigh|calf)_joint"
         )
-        self.rewards.box_joint_pos_limits.weight = -20.0 
-        # 禁止超速
-        self.rewards.joint_vel_limits.weight = -0.3
-
-        # Action penalties
-        self.rewards.action_rate_l2.weight = -0.08
-        # UNUESD self.rewards.action_l2.weight = 0.0
-        self.rewards.box_joint_action_rate.weight = -0.4
 
         # Contact sensor
-        self.rewards.undesired_contacts.weight = -1.5
         self.rewards.undesired_contacts.params["sensor_cfg"].body_names = [
-            "base", "trunk", ".*_hip", ".*_thigh", ".*calf"
+            "base", ".*_thigh", ".*calf"
         ]
 
-        # self.rewards.contact_forces.weight = -0.005
-        # self.rewards.contact_forces.params["sensor_cfg"].body_names = [
-        #     self.foot_link_name
-        # ]
-
-        # Velocity-tracking rewards
-        self.rewards.track_lin_vel_xy_exp.weight = 6
-        self.rewards.track_ang_vel_z_exp.weight = 2.0
-
-        # Others
-        self.rewards.feet_air_time.weight = 0.1
+        # Foot and gait reward params.
         self.rewards.feet_air_time.params["threshold"] = 0.25
         self.rewards.feet_air_time.params["sensor_cfg"].body_names = [self.foot_link_name]
-        self.rewards.feet_contact.weight = -1.0
         self.rewards.feet_contact.params["sensor_cfg"].body_names = [
             self.foot_link_name
         ]
         self.rewards.feet_contact.params["expect_contact_num"] = 2 # 确保期望值为 2
-        self.rewards.feet_stumble.weight = -0.01
         self.rewards.feet_stumble.params["sensor_cfg"].body_names = [
             self.foot_link_name
         ]
-        self.rewards.feet_slide.weight = -0.05
         self.rewards.feet_slide.params["sensor_cfg"].body_names = [self.foot_link_name]
         self.rewards.feet_slide.params["asset_cfg"].body_names = [self.foot_link_name]
-        # self.rewards.joint_power.weight = -2e-5
-        # 测试 暂时取消
-        self.rewards.joint_power.weight = -2e-6
-        self.rewards.stand_still_without_cmd.weight = -3.5
-        # self.rewards.joint_position_penalty.weight = -0.9
-        # self.rewards.joint_position_penalty.params["stand_still_scale"] = 1.5
-        # self.rewards.joint_position_penalty.params["velocity_threshold"] = 0.3
-        self.rewards.rotate_joint_pos_penalty.weight = -0.03
-        self.rewards.prismatic_joint_pos_penalty.weight = -20
-        self.rewards.feet_height_exp.weight = 1.5
         self.rewards.feet_height_exp.params["target_height"] = 0.08
         self.rewards.feet_height_exp.params["asset_cfg"].body_names = [
             self.foot_link_name
         ]
-        # self.rewards.feet_height_body_exp.weight = -4.9
-        # self.rewards.feet_height_body_exp.params["target_height"] = -0.32
-        # self.rewards.feet_height_body_exp.params["asset_cfg"].body_names = [
-        #     self.foot_link_name
-        # ]
-        self.rewards.feet_gait.weight = 3.0
         self.rewards.feet_gait.params["velocity_threshold"] = 0.1
-        # trotting
-        self.rewards.feet_gait.params["synced_feet_pair_names"] = (
-            ("FL_foot", "RR_foot"),
-            ("FR_foot", "RL_foot"),
+        self.rewards.feet_gait.params["joint_group_pairs"] = (
+            (
+                ("FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"),
+                ("RR_hip_joint", "RR_thigh_joint", "RR_calf_joint"),
+            ),
+            (
+                ("FR_hip_joint", "FR_thigh_joint", "FR_calf_joint"),
+                ("RL_hip_joint", "RL_thigh_joint", "RL_calf_joint"),
+            ),
         )
-        # pronking
-        # self.rewards.feet_gait.params["synced_feet_pair_names"] = (
-        #     ("FL_foot", "FR_foot"),
-        #     ("RR_foot", "RL_foot"),
-        # ) 
+
+        # ------------------------------Final active reward weights------------------------------
+        # Put final weights here as the single source of truth for this task.
+        # Order: MGDP rewards, extra Arcdog rewards, then disabled rewards.
+        reward_weights = {
+            # MGDP stage1 rewards.
+            "track_lin_vel_xy_exp": 1.0,        # tracking_lin_vel
+            "track_ang_vel_z_exp": 0.5,         # tracking_ang_vel
+            "lin_vel_z_l2": -1.0,               # lin_vel_z
+            "ang_vel_xy_l2": -0.05,             # ang_vel_xy
+            "flat_orientation_l2": -0.2,        # orientation
+            "stand_still_without_cmd": -0.1,    # stand_still
+            "joint_torques_l2": -1.0e-5,        # torques
+            "joint_acc_l2": -2.5e-7,            # dof_acc
+            "action_rate_l2": -0.01,            # action_rate
+            "undesired_contacts": -1.0,         # collision
+            "feet_gait": -0.1,                  # motion_trot
+            "feet_air_time": 1.0,
+            "feet_stumble": -1.0,
+
+            # Extra Arcdog adjustable-leg/bodyflat rewards.
+            "box_joint_vel_penalty": -0.01,
+            "box_joint_acc_penalty": -1.0e-5,
+            "box_joint_pos_limits": -1.0,
+            "box_joint_pos_penalty": 0,
+            "joint_pos_limits": -0.05,
+            "body_lin_acc_l2": -0.0,
+
+            # Explicitly disabled for this task.
+            "is_terminated": 0.0,
+            "base_height_l2": 0.0,
+            "stand_still_flat": 0.0,
+            "joint_vel_l2": 0.0,
+            "feet_height_exp": 0.0,
+            "feet_contact": 0.0,
+            "feet_slide": 0.0,
+            "joint_vel_limits": 0.0,
+            "box_joint_action_rate": 0.0,
+            "joint_power": 0.0,
+            "rotate_joint_pos_penalty": 0.0,
+        }
+        for reward_name, weight in reward_weights.items():
+            getattr(self.rewards, reward_name).weight = weight
+
         # If the weight of rewards is 0, set rewards to None
         if self.__class__.__name__ == "ArclabArcdogAdjustableLegBodyflatEnvCfg":
             self.disable_zero_weight_rewards()
@@ -294,10 +387,6 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ------------------------------Terminations------------------------------
         self.terminations.illegal_contact.params["sensor_cfg"].body_names = [
             self.base_link_name,
-            self.trunk_link_name,
-            # self.abad_link_name,
-            # self.knee_link_name,
-            # self.hip_link_name,
         ]
         # self.terminations.illegal_contact = None
         # ------------------------------Curriculums------------------------------

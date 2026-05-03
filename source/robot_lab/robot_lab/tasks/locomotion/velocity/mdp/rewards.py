@@ -390,6 +390,44 @@ class GaitReward(ManagerTermBase):
         se_act_1 = torch.clip(torch.square(contact_time[:, foot_0] - air_time[:, foot_1]), max=self.max_err**2)
         return torch.exp(-(se_act_0 + se_act_1) / self.std)
 
+def motion_trot_joint_symmetry(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    joint_group_pairs: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...],
+    command_name: str = "base_velocity",
+    command_threshold: float = 0.1,
+    velocity_threshold: float = 0.1,
+    stop_after_steps: int | None = None,
+) -> torch.Tensor:
+    """MGDP-style trot motion penalty based on diagonal joint-pose symmetry.
+
+    MGDP's ``motion_trot`` penalizes the absolute joint-position difference
+    between diagonal legs. This is different from :class:`GaitReward`, which uses
+    contact/air-time synchronization. Use a negative reward weight for this term.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if not hasattr(env, "_motion_trot_joint_pair_ids"):
+        env._motion_trot_joint_pair_ids = []
+        for left_group, right_group in joint_group_pairs:
+            left_ids = [asset.find_joints(joint_name)[0][0] for joint_name in left_group]
+            right_ids = [asset.find_joints(joint_name)[0][0] for joint_name in right_group]
+            env._motion_trot_joint_pair_ids.append((left_ids, right_ids))
+
+    reward = torch.zeros(env.num_envs, device=env.device)
+    for left_ids, right_ids in env._motion_trot_joint_pair_ids:
+        left_pos = asset.data.joint_pos[:, left_ids]
+        right_pos = asset.data.joint_pos[:, right_ids]
+        reward += torch.sum(torch.abs(left_pos - right_pos), dim=1)
+
+    cmd = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    body_vel = torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
+    active = torch.logical_or(cmd > command_threshold, body_vel > velocity_threshold)
+    reward = torch.where(active, reward, torch.zeros_like(reward))
+
+    if stop_after_steps is not None and getattr(env, "common_step_counter", 0) > stop_after_steps:
+        reward *= 0.0
+    return reward
+
 def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joints: list[list[str]]) -> torch.Tensor:
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
