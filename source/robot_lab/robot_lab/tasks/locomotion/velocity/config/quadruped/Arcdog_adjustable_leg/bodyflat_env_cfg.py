@@ -116,27 +116,16 @@ class ArcdogAdjustableLegRewardsCfg(RewardsCfg):
         },
     )
 
-    # Keep the public reward name as "feet_gait", but use the MGDP-style
-    # motion_trot implementation: diagonal joint-pose symmetry penalty.
     feet_gait = RewTerm(
-        func=mdp.motion_trot_joint_symmetry,
+        func=mdp.GaitReward,
         weight=0.0,
         params={
-            "command_name": "base_velocity",
-            "command_threshold": 0.1,
-            "velocity_threshold": 0.1,
-            "stop_after_steps": None,
+            "std": 0.5,
+            "max_err": 0.2,
+            "velocity_threshold": 0.5,
+            "synced_feet_pair_names": (("", ""), ("", "")),
             "asset_cfg": SceneEntityCfg("robot"),
-            "joint_group_pairs": (
-                (
-                    ("FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"),
-                    ("RR_hip_joint", "RR_thigh_joint", "RR_calf_joint"),
-                ),
-                (
-                    ("FR_hip_joint", "FR_thigh_joint", "FR_calf_joint"),
-                    ("RL_hip_joint", "RL_thigh_joint", "RL_calf_joint"),
-                ),
-            ),
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
         },
     )
 
@@ -222,8 +211,6 @@ class ArcdogAdjustableLegRewardsCfg(RewardsCfg):
         params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
     )
 
-
-
 @configclass
 class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
     actions: ArcdogAdjustableLegActionsCfg = ArcdogAdjustableLegActionsCfg()
@@ -258,7 +245,16 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
         self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
-        self.scene.terrain.terrain_generator=ROUGH_TERRAINS_CFG
+        self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG.copy()
+        # Initial spawn difficulty. 0 means easiest row; curriculum can still
+        # move successful envs to harder rows during training.
+        self.scene.terrain.max_init_terrain_level = 3
+        self.scene.terrain.terrain_generator.num_rows = 10
+        self.scene.terrain.terrain_generator.num_cols = 10
+
+
+        if getattr(self.curriculum, "terrain_levels", None) is not None:
+            self.scene.terrain.terrain_generator.curriculum = True
         # ------------------------------Observations------------------------------
         self.observations.policy.base_lin_vel.scale = 2.0
         self.observations.policy.base_ang_vel.scale = 0.25
@@ -330,7 +326,7 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
 
         # Contact sensor
         self.rewards.undesired_contacts.params["sensor_cfg"].body_names = [
-            "base", ".*_thigh", ".*calf"
+            "base", "trunk", ".*_hip", ".*_thigh", ".*calf"
         ]
 
         # Foot and gait reward params.
@@ -350,49 +346,85 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
             self.foot_link_name
         ]
         self.rewards.feet_gait.params["velocity_threshold"] = 0.1
-        self.rewards.feet_gait.params["joint_group_pairs"] = (
-            (
-                ("FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"),
-                ("RR_hip_joint", "RR_thigh_joint", "RR_calf_joint"),
-            ),
-            (
-                ("FR_hip_joint", "FR_thigh_joint", "FR_calf_joint"),
-                ("RL_hip_joint", "RL_thigh_joint", "RL_calf_joint"),
-            ),
+        self.rewards.feet_gait.params["synced_feet_pair_names"] = (
+            ("FL_foot", "RR_foot"),
+            ("FR_foot", "RL_foot"),
         )
 
-        # ------------------------------Final active reward weights------------------------------
-        # Put final weights here as the single source of truth for this task.
-        # Order: MGDP rewards, extra Arcdog rewards, then disabled rewards.
-        reward_weights = {
-            # MGDP stage1 rewards.
-            "track_lin_vel_xy_exp": 2.0,        # tracking_lin_vel
-            "track_ang_vel_z_exp": 1.0,         # tracking_ang_vel
-            "lin_vel_z_l2": -1.0,               # lin_vel_z
-            "ang_vel_xy_l2": -0.05,             # ang_vel_xy
-            "flat_orientation_l2": -0.2,        # orientation
-            "stand_still_without_cmd": -0.1,    # stand_still
-            "joint_torques_l2": -1.0e-5,        # torques
-            "joint_acc_l2": -2.5e-7,            # dof_acc
-            "action_rate_l2": -0.01,            # action_rate
-            "undesired_contacts": -1.0,         # collision
-            "feet_gait": -0.1,                  # motion_trot
-            "feet_air_time": 1.0,
-            "feet_stumble": -1,
+        dev_lxq_new_reward_weights = {
+            # dev_lxq_new reward weights.
+            # Velocity tracking. Same functions as MGDP tracking_lin_vel / tracking_ang_vel.
+            "track_lin_vel_xy_exp": 6.0,
+            "track_ang_vel_z_exp": 2.0,
 
-            # Extra Arcdog adjustable-leg/bodyflat rewards.
+            # Base motion and orientation. lin_vel_z / ang_vel_xy / orientation use the same functions as MGDP.
+            "lin_vel_z_l2": -0.3,
+            "ang_vel_xy_l2": -0.2,
+            "flat_orientation_l2": -5.0,
+            "base_height_l2": -3.0,
+            "body_lin_acc_l2": -0.01,
+            "stand_still_flat": 3.0,
+
+            # Contacts, feet, and gait. undesired_contacts / feet_air_time / feet_stumble share MGDP functions.
+            "undesired_contacts": -1.5,
+            "feet_air_time": 0.1,
+            "feet_contact": -1.0,
+            "feet_stumble": -0.01,
+            "feet_slide": -0.05,
+            "feet_height_exp": 1.5,
+            "feet_gait": 3.0,
+            "stand_still_without_cmd": -3.5,
+
+            # Joint and action penalties. joint_acc / action_rate use the same functions as MGDP.
+            "joint_vel_l2": -0.005,
+            "joint_acc_l2": -1.0e-7,
+            "joint_pos_limits": -0.05,
+            "joint_vel_limits": -0.3,
+            "action_rate_l2": -0.08,
+            "joint_power": -2.0e-6,
+            "rotate_joint_pos_penalty": -0.03,
+
+            # Adjustable-leg box joint penalties.
+            "box_joint_vel_penalty": -0.01,
+            "box_joint_acc_penalty": -1.0e-5,
+            "box_joint_pos_limits": -20.0,
+            "box_joint_action_rate": -0.4,
+            "box_joint_pos_penalty": -20.0,
+
+            # Termination.
+            "is_terminated": -20.0,
+
+            # Explicitly disabled in dev_lxq_new.
+            "joint_torques_l2": 0.0,
+        }
+        
+        my_reward_weights = {
+            # My MGDP reward weights. Not active unless reward_weights is switched below.
+            "mgdp_tracking_lin_vel": 1.0,
+            "mgdp_tracking_ang_vel": 0.5,
+            "mgdp_lin_vel_z": -1.0,
+            "mgdp_ang_vel_xy": -0.05,
+            "mgdp_orientation": -0.2,
+            "mgdp_stand_still": -0.1,
+            "mgdp_torques": -1.0e-5,
+            "mgdp_dof_acc": -2.5e-7,
+            "mgdp_action_rate": -0.01,
+            "mgdp_collision": -1.0,
+            "mgdp_motion_trot": -0.1,
+            "mgdp_feet_air_time": 1.0,
+            "mgdp_feet_stumble": -1.0,
+
+            # Extra Arcdog adjustable-leg/bodyflat rewards used in my MGDP experiment.
             "box_joint_vel_penalty": -0.01,
             "box_joint_acc_penalty": -1.0e-5,
             "box_joint_pos_limits": -1.0,
-            "box_joint_pos_penalty": 0,
+            "box_joint_pos_penalty": 0.0,
             "joint_pos_limits": -0.05,
             "body_lin_acc_l2": -0.0,
             "feet_height_exp": 1.5,
-
-            # Termination penalty.
             "is_terminated": -20.0,
 
-            # Explicitly disabled for this task.
+            # Disabled in my MGDP experiment.
             "base_height_l2": 0.0,
             "stand_still_flat": 0.0,
             "joint_vel_l2": 0.0,
@@ -403,6 +435,10 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
             "joint_power": 0.0,
             "rotate_joint_pos_penalty": 0.0,
         }
+
+        reward_weights = dev_lxq_new_reward_weights
+        # reward_weights = my_reward_weights
+
         for reward_name, weight in reward_weights.items():
             getattr(self.rewards, reward_name).weight = weight
 
@@ -414,8 +450,8 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.terminations.illegal_contact.params["sensor_cfg"].body_names = [
             self.base_link_name,
             self.trunk_link_name,
-            self.hip_link_name,
-            self.knee_link_name,
+            # self.hip_link_name,
+            # self.knee_link_name,
         ]
         # self.terminations.illegal_contact = None
         # ------------------------------Curriculums------------------------------

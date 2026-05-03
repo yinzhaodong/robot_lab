@@ -68,26 +68,11 @@ conda activate dog
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
-  --headless \
   --num_envs=6 \
   --max_iterations=20000 \
   --run_name=rew
 ```
-
-The Bodyflat task enables MGDP-style randomized action latency for sim-to-real.
-The default range is `0.0` to `0.02` seconds, configured in:
-
-```text
-source/robot_lab/robot_lab/tasks/locomotion/velocity/config/quadruped/Arcdog_adjustable_leg/bodyflat_env_cfg.py
-```
-
-Relevant parameters:
-
-```python
-use_delay=True
-randomize_action_latency=True
-latency_range=(0.0, 0.02)
-```
+1
 
 
 ### Resume
@@ -116,6 +101,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/play.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
   --num_envs=16 \
   --play_lin_vel_x=0.5 \
+  --play_max_init_terrain_level=0 \
   --load_run=2026-05-03_12-09-41_new \
   --checkpoint=model_2000.pt
 ```
@@ -126,6 +112,8 @@ CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/play.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
   --num_envs=16 \
   --play_lin_vel_x=0.9 \
-  --checkpoint=logs/rsl_rl/arclab_arcdog_adjustable_leg_bodyflat/2026-05-03_11-06-34_raw/model_4600.pt
+  --play_terrain_size=8.0 \
+  --play_max_init_terrain_level=0 \
+  --checkpoint=logs/rsl_rl/arclab_1/2026-05-03_15-24-50_rew/model_3000.pt
 ```
 

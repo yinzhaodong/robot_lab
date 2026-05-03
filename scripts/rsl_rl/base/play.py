@@ -44,6 +44,13 @@ parser.add_argument("--real-time", action="store_true", default=False, help="Run
 parser.add_argument("--keyboard", action="store_true", default=False, help="Whether to use keyboard.")
 parser.add_argument("--se2_gamepad", action="store_true", default=False, help="Whether to use se2_gamepad.")
 parser.add_argument("--play_lin_vel_x", type=float, default=0.5, help="Fixed forward x velocity command for play mode.")
+parser.add_argument("--play_terrain_size", type=float, default=4.0, help="Terrain tile size used in play mode.")
+parser.add_argument(
+    "--play_max_init_terrain_level",
+    type=int,
+    default=0,
+    help="Maximum initial terrain row for play mode. 0 starts from the easiest row.",
+)
 parser.add_argument("--debug", action="store_true", default=False, help="Print debug information (env config, action and observation spaces).")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point.")
 parser.add_argument("--moe", action="store_true", default=False, help="Whether to use MoE.")
@@ -510,12 +517,16 @@ def main():
         agent_cfg.policy.init_noise_std = 0.8
     # make a smaller scene for play
     env_cfg.scene.num_envs = args_cli.num_envs
-    # spawn the robot randomly in the grid (instead of their terrain levels)
-    env_cfg.scene.terrain.max_init_terrain_level = None
+    # Start play from easy terrain by default. None would start across the full terrain difficulty range.
+    env_cfg.scene.terrain.max_init_terrain_level = args_cli.play_max_init_terrain_level
     # reduce the number of terrains to save memory
     if env_cfg.scene.terrain.terrain_generator is not None:
         env_cfg.scene.terrain.terrain_generator.num_rows = 5
         env_cfg.scene.terrain.terrain_generator.num_cols = 5
+        env_cfg.scene.terrain.terrain_generator.size = (
+            args_cli.play_terrain_size,
+            args_cli.play_terrain_size,
+        )
         env_cfg.scene.terrain.terrain_generator.curriculum = False
 
     # disable randomization for play

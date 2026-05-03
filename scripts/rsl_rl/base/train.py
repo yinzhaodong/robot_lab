@@ -14,7 +14,11 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import inspect
+import json
 import os
+import shutil
+import statistics
 import sys
 import importlib.metadata as metadata
 import platform
@@ -55,6 +59,7 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+ORIGINAL_ARGV = sys.argv.copy()
 
 # # always enable cameras to record video
 # if args_cli.video:
@@ -123,6 +128,75 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+class LastBestCheckpointMixin:
+    """Archive numbered checkpoints separately while keeping last.pt and best.pt in the run directory."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._best_mean_reward_for_ckpt = float("-inf")
+        self._last_mean_reward_for_ckpt: float | None = None
+        self._model_archive_dir = self._build_model_archive_dir()
+
+    def _build_model_archive_dir(self) -> str | None:
+        log_dir = getattr(self, "log_dir", None)
+        if log_dir is None:
+            return None
+        run_id = os.path.basename(log_dir.rstrip(os.sep))
+        exp_dir = os.path.dirname(log_dir.rstrip(os.sep))
+        exp_name = os.path.basename(exp_dir.rstrip(os.sep))
+        archive_dir = os.path.join(os.path.dirname(exp_dir.rstrip(os.sep)), f"{exp_name}_model", run_id)
+        os.makedirs(archive_dir, exist_ok=True)
+        return archive_dir
+
+    def log(self, locs: dict, *args, **kwargs):
+        rb = locs.get("rewbuffer")
+        if rb is not None and len(rb) > 0:
+            try:
+                self._last_mean_reward_for_ckpt = float(statistics.mean(rb))
+            except Exception:
+                self._last_mean_reward_for_ckpt = None
+        return super().log(locs, *args, **kwargs)
+
+    def save(self, path: str, infos=None):
+        save_path = path
+        file_name = os.path.basename(path)
+        if (
+            self._model_archive_dir is not None
+            and file_name.startswith("model_")
+            and file_name.endswith(".pt")
+        ):
+            save_path = os.path.join(self._model_archive_dir, file_name)
+
+        super().save(save_path, infos)
+
+        log_dir = getattr(self, "log_dir", None)
+        if log_dir is None:
+            return
+        try:
+            last_path = os.path.join(log_dir, "last.pt")
+            best_path = os.path.join(log_dir, "best.pt")
+            shutil.copy2(save_path, last_path)
+
+            mean_reward = self._last_mean_reward_for_ckpt
+            if mean_reward is None:
+                if not os.path.exists(best_path):
+                    shutil.copy2(last_path, best_path)
+            elif mean_reward > self._best_mean_reward_for_ckpt:
+                self._best_mean_reward_for_ckpt = mean_reward
+                shutil.copy2(last_path, best_path)
+        except Exception as err:
+            print(f"[WARN] Failed to update last/best checkpoints: {err}")
+
+
+class ManagedOnPolicyRunner(LastBestCheckpointMixin, OnPolicyRunner):
+    pass
+
+
+class ManagedDistillationRunner(LastBestCheckpointMixin, DistillationRunner):
+    pass
+
 # --- MoE Actor that can drop-in replace the base policy's actor MLP ---
 import torch
 import torch.nn as nn
@@ -544,6 +618,83 @@ def _fill_default_obs_groups_for_rsl_rl_5(train_cfg: dict, env) -> dict:
             obs_groups["critic"] = ["policy"]
     return train_cfg
 
+
+def _snapshot_training_sources(log_dir: str, env_cfg, agent_cfg) -> None:
+    """Copy the source files that define the current training run into the log directory."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    snapshot_dir = os.path.join(log_dir, "source_snapshot")
+    copied_files: list[str] = []
+
+    def _copy_file(path: str | None) -> None:
+        if path is None:
+            return
+        abs_path = os.path.abspath(path)
+        if not os.path.isfile(abs_path):
+            return
+        if not abs_path.startswith(repo_root):
+            return
+        rel_path = os.path.relpath(abs_path, repo_root)
+        dst_path = os.path.join(snapshot_dir, rel_path)
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        shutil.copy2(abs_path, dst_path)
+        copied_files.append(rel_path)
+
+    def _copy_py_tree(path: str | None) -> None:
+        if path is None or not os.path.isdir(path):
+            return
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in {"__pycache__", ".git"}]
+            for file_name in files:
+                if file_name.endswith(".py"):
+                    _copy_file(os.path.join(root, file_name))
+
+    os.makedirs(snapshot_dir, exist_ok=True)
+    _copy_file(__file__)
+
+    def _safe_source_file(obj) -> str | None:
+        try:
+            return inspect.getsourcefile(obj)
+        except (TypeError, OSError):
+            return None
+
+    for cfg_obj in (env_cfg, agent_cfg):
+        for cls in type(cfg_obj).mro():
+            _copy_file(_safe_source_file(cls))
+
+    env_source = _safe_source_file(type(env_cfg))
+    if env_source is not None:
+        _copy_py_tree(os.path.dirname(env_source))
+
+    locomotion_root = os.path.join(repo_root, "source", "robot_lab", "robot_lab", "tasks", "locomotion", "velocity")
+    _copy_file(os.path.join(locomotion_root, "velocity_env_cfg.py"))
+    _copy_py_tree(os.path.join(locomotion_root, "mdp"))
+
+    manifest = {
+        "task": args_cli.task,
+        "agent": args_cli.agent,
+        "argv": ORIGINAL_ARGV,
+        "source_files": sorted(set(copied_files)),
+    }
+    with open(os.path.join(snapshot_dir, "manifest.json"), "w", encoding="utf-8") as file:
+        json.dump(manifest, file, indent=2, ensure_ascii=False)
+
+
+def _get_checkpoint_path_with_archive_fallback(log_root_path: str, agent_cfg) -> str:
+    """Resolve checkpoints from the run directory first, then the sibling model archive."""
+    resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+    if os.path.isfile(resume_path):
+        return resume_path
+
+    load_run = str(agent_cfg.load_run)
+    load_checkpoint = str(agent_cfg.load_checkpoint)
+    if load_run and load_checkpoint:
+        exp_dir = log_root_path.rstrip(os.sep)
+        exp_name = os.path.basename(exp_dir)
+        archive_path = os.path.join(os.path.dirname(exp_dir), f"{exp_name}_model", load_run, load_checkpoint)
+        if os.path.isfile(archive_path):
+            return archive_path
+    return resume_path
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -642,7 +793,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        resume_path = _get_checkpoint_path_with_archive_fallback(log_root_path, agent_cfg)
 
     # wrap for video recording
     if args_cli.video and IS_MASTER:
@@ -669,7 +820,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # =========================================================================
     if args_cli.agent == "symmetric_ppo_cfg" or agent_cfg.class_name == "SymmetricOnPolicyRunner":
         from robot_lab.tasks.locomotion.velocity.config.quadruped.Arcdog_adjustable_leg.agents.symmetric_ppo import SymmetricOnPolicyRunner
-        runner = SymmetricOnPolicyRunner(
+        class ManagedSymmetricOnPolicyRunner(LastBestCheckpointMixin, SymmetricOnPolicyRunner):
+            pass
+
+        runner = ManagedSymmetricOnPolicyRunner(
             env, 
             train_cfg,
             config=env_cfg,       # <==== 补充缺失的 config 参数！
@@ -677,9 +831,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             device=agent_cfg.device
         )
     elif agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
+        runner = ManagedOnPolicyRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
+        runner = ManagedDistillationRunner(env, train_cfg, log_dir=log_dir, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     # =========================================================================
@@ -779,6 +933,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    if IS_MASTER:
+        _snapshot_training_sources(log_dir, env_cfg, agent_cfg)
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
     # Optional: Force commit

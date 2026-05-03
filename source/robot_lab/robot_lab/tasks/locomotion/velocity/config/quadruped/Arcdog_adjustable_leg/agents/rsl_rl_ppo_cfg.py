@@ -40,14 +40,14 @@ class ArclabArcdogAdjustableLegFlatPPORunnerCfg(ArclabArcdogAdjustableLegRoughPP
         super().__post_init__()
 
         self.max_iterations = 5000
-        self.experiment_name = "arclab"
+        self.experiment_name = "arclab_02"
 
 @configclass
 class ArclabArcdogAdjustableLegBodyflatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 17000
     save_interval = 1000
-    experiment_name = "arclab_1"
+    experiment_name = "arclab_02"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
