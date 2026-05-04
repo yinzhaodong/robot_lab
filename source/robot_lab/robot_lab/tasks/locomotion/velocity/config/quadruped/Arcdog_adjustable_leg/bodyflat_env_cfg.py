@@ -328,15 +328,22 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.undesired_contacts.params["sensor_cfg"].body_names = [
             "base", "trunk", ".*_hip", ".*_thigh", ".*calf"
         ]
+        self.rewards.mgdp_collision.params["sensor_cfg"].body_names = [
+            "base", "trunk", ".*_hip", ".*_thigh", ".*calf"
+        ]
 
         # Foot and gait reward params.
         self.rewards.feet_air_time.params["threshold"] = 0.25
         self.rewards.feet_air_time.params["sensor_cfg"].body_names = [self.foot_link_name]
+        self.rewards.mgdp_feet_air_time.params["sensor_cfg"].body_names = [self.foot_link_name]
         self.rewards.feet_contact.params["sensor_cfg"].body_names = [
             self.foot_link_name
         ]
         self.rewards.feet_contact.params["expect_contact_num"] = 2 # 确保期望值为 2
         self.rewards.feet_stumble.params["sensor_cfg"].body_names = [
+            self.foot_link_name
+        ]
+        self.rewards.mgdp_feet_stumble.params["sensor_cfg"].body_names = [
             self.foot_link_name
         ]
         self.rewards.feet_slide.params["sensor_cfg"].body_names = [self.foot_link_name]
@@ -354,41 +361,54 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
         dev_lxq_new_reward_weights = {
             # dev_lxq_new reward weights.
             # Velocity tracking. Same functions as MGDP tracking_lin_vel / tracking_ang_vel.
-            "track_lin_vel_xy_exp": 6.0,
-            "track_ang_vel_z_exp": 2.0,
+            "track_lin_vel_xy_exp": 3.0,
+            "track_ang_vel_z_exp": 1.0,
+
+     
+            "mgdp_lin_vel_z": -0.3,
+            "mgdp_ang_vel_xy": -0.05,
+            "mgdp_orientation": -0.2,
+            "mgdp_stand_still": -0.1,
+            "mgdp_torques": -1.0e-5,
+            "mgdp_dof_acc": -2.5e-7,
+            "mgdp_action_rate": -0.01,
+            "mgdp_collision": -0.2,
+            "mgdp_motion_trot": -0.1,
+            "mgdp_feet_air_time": 1.0,
+            "mgdp_feet_stumble": -1.0,
 
             # Base motion and orientation. lin_vel_z / ang_vel_xy / orientation use the same functions as MGDP.
-            "lin_vel_z_l2": -0.3,
-            "ang_vel_xy_l2": -0.2,
-            "flat_orientation_l2": -5.0,
-            "base_height_l2": -3.0,
-            "body_lin_acc_l2": -0.01,
-            "stand_still_flat": 3.0,
+            # "lin_vel_z_l2": -0.3,
+            # "ang_vel_xy_l2": -0.2,
+            # "flat_orientation_l2": -5.0,
+            # "base_height_l2": -3.0,
+            # "body_lin_acc_l2": -0.01,
 
-            # Contacts, feet, and gait. undesired_contacts / feet_air_time / feet_stumble share MGDP functions.
-            "undesired_contacts": -1.5,
-            "feet_air_time": 0.1,
-            "feet_contact": -1.0,
-            "feet_stumble": -0.01,
-            "feet_slide": -0.05,
-            "feet_height_exp": 1.5,
-            "feet_gait": 3.0,
-            "stand_still_without_cmd": -3.5,
+            # # Contacts, feet, and gait. undesired_contacts / feet_air_time / feet_stumble share MGDP functions.
+            # "undesired_contacts": -1.5,
+            # "feet_air_time": 1.0,
+            # "feet_contact": -0.0,
+            # "feet_stumble": -0.1,
+            # "feet_slide": -0.0,
+            # "feet_height_exp": 0,
+            # "feet_gait": 3.0,
+            # "stand_still_without_cmd": -0.1,
+            # "stand_still_flat": 3.0,
 
             # Joint and action penalties. joint_acc / action_rate use the same functions as MGDP.
-            "joint_vel_l2": -0.005,
-            "joint_acc_l2": -1.0e-7,
-            "joint_pos_limits": -0.05,
-            "joint_vel_limits": -0.3,
-            "action_rate_l2": -0.08,
-            "joint_power": -2.0e-6,
-            "rotate_joint_pos_penalty": -0.03,
+            # "joint_vel_l2": -0.005,
+            # "joint_acc_l2": -1.0e-7,
+            # "joint_pos_limits": -0.05,
+            # "joint_vel_limits": -0.3,
+            # "action_rate_l2": -0.08,
+            # "joint_power": -0,
+            # "rotate_joint_pos_penalty": -0.03,
 
             # Adjustable-leg box joint penalties.
-            "box_joint_vel_penalty": -0.01,
-            "box_joint_acc_penalty": -1.0e-5,
+            # "box_joint_vel_penalty": -0.01,
+            # "box_joint_acc_penalty": -1.0e-5,
             "box_joint_pos_limits": -20.0,
-            "box_joint_action_rate": -0.4,
+            # "box_joint_action_rate": -0.4,
             "box_joint_pos_penalty": -20.0,
 
             # Termination.
@@ -421,7 +441,7 @@ class ArclabArcdogAdjustableLegBodyflatEnvCfg(LocomotionVelocityRoughEnvCfg):
             "box_joint_pos_penalty": 0.0,
             "joint_pos_limits": -0.05,
             "body_lin_acc_l2": -0.0,
-            "feet_height_exp": 1.5,
+            "feet_height_exp": 0,
             "is_terminated": -20.0,
 
             # Disabled in my MGDP experiment.

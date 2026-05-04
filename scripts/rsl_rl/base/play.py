@@ -44,12 +44,45 @@ parser.add_argument("--real-time", action="store_true", default=False, help="Run
 parser.add_argument("--keyboard", action="store_true", default=False, help="Whether to use keyboard.")
 parser.add_argument("--se2_gamepad", action="store_true", default=False, help="Whether to use se2_gamepad.")
 parser.add_argument("--play_lin_vel_x", type=float, default=0.5, help="Fixed forward x velocity command for play mode.")
-parser.add_argument("--play_terrain_size", type=float, default=4.0, help="Terrain tile size used in play mode.")
+parser.add_argument(
+    "--play_camera_eye",
+    type=float,
+    nargs=3,
+    default=(-3.0, -4.0, 2.2),
+    metavar=("X", "Y", "Z"),
+    help="Viewer eye offset relative to the first environment during play.",
+)
+parser.add_argument(
+    "--play_camera_lookat",
+    type=float,
+    nargs=3,
+    default=(1.2, 0.0, 0.4),
+    metavar=("X", "Y", "Z"),
+    help="Viewer look-at offset relative to the first environment during play.",
+)
+parser.add_argument(
+    "--play_terrain_size",
+    type=float,
+    default=None,
+    help="Optional terrain tile size override for play mode. Defaults to the train task config.",
+)
+parser.add_argument(
+    "--play_terrain_rows",
+    type=int,
+    default=None,
+    help="Optional terrain row count override for play mode. Defaults to the train task config.",
+)
+parser.add_argument(
+    "--play_terrain_cols",
+    type=int,
+    default=None,
+    help="Optional terrain column count override for play mode. Defaults to the train task config.",
+)
 parser.add_argument(
     "--play_max_init_terrain_level",
     type=int,
-    default=0,
-    help="Maximum initial terrain row for play mode. 0 starts from the easiest row.",
+    default=None,
+    help="Optional maximum initial terrain row override for play mode. Defaults to the train task config.",
 )
 parser.add_argument("--debug", action="store_true", default=False, help="Print debug information (env config, action and observation spaces).")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point.")
@@ -517,17 +550,12 @@ def main():
         agent_cfg.policy.init_noise_std = 0.8
     # make a smaller scene for play
     env_cfg.scene.num_envs = args_cli.num_envs
-    # Start play from easy terrain by default. None would start across the full terrain difficulty range.
     env_cfg.scene.terrain.max_init_terrain_level = args_cli.play_max_init_terrain_level
-    # reduce the number of terrains to save memory
-    if env_cfg.scene.terrain.terrain_generator is not None:
-        env_cfg.scene.terrain.terrain_generator.num_rows = 5
-        env_cfg.scene.terrain.terrain_generator.num_cols = 5
-        env_cfg.scene.terrain.terrain_generator.size = (
-            args_cli.play_terrain_size,
-            args_cli.play_terrain_size,
-        )
-        env_cfg.scene.terrain.terrain_generator.curriculum = False
+
+    env_cfg.scene.terrain.terrain_generator.num_rows = 5
+    env_cfg.scene.terrain.terrain_generator.num_cols = 3
+    env_cfg.scene.terrain.terrain_generator.border_size = 0
+    
 
     # disable randomization for play
     env_cfg.observations.policy.enable_corruption = False
@@ -536,6 +564,17 @@ def main():
     env_cfg.events.randomize_push_robot = None
     env_cfg.curriculum.terrain_levels = None
     env_cfg.curriculum.command_levels = None
+    # Keep all robots facing the world +X direction during play instead of random reset yaw.
+    if env_cfg.events.randomize_reset_base is not None:
+        env_cfg.events.randomize_reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
+        env_cfg.events.randomize_reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
 
     # For visual evaluation, use a fixed forward-only command by default.
     env_cfg.commands.base_velocity.heading_command = False
@@ -546,6 +585,11 @@ def main():
     env_cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
     env_cfg.commands.base_velocity.ranges.heading = (0.0, 0.0)
     env_cfg.commands.base_velocity.resampling_time_range = (1.0e9, 1.0e9)
+    # Use a fixed startup view on the first environment without following the robot.
+    env_cfg.viewer.origin_type = "env"
+    env_cfg.viewer.env_index = 0
+    env_cfg.viewer.eye = tuple(args_cli.play_camera_eye)
+    env_cfg.viewer.lookat = tuple(args_cli.play_camera_lookat)
 
     if args_cli.keyboard:
         env_cfg.scene.num_envs = 1

@@ -68,6 +68,7 @@ conda activate dog
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/train.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
+  --headless \
   --num_envs=6 \
   --max_iterations=20000 \
   --run_name=rew
@@ -96,15 +97,6 @@ CUDA_VISIBLE_DEVICES=5 python scripts/rsl_rl/base/train.py \
 
 Play uses the same log root:
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/play.py \
-  --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
-  --num_envs=16 \
-  --play_lin_vel_x=0.5 \
-  --play_max_init_terrain_level=0 \
-  --load_run=2026-05-03_12-09-41_new \
-  --checkpoint=model_2000.pt
-```
 
 
 ```bash
@@ -112,8 +104,15 @@ CUDA_VISIBLE_DEVICES=0 python scripts/rsl_rl/base/play.py \
   --task=RobotLab-Isaac-Velocity-Bodyflat-ArcdogAdjustableLeg-v0 \
   --num_envs=16 \
   --play_lin_vel_x=0.9 \
-  --play_terrain_size=8.0 \
-  --play_max_init_terrain_level=0 \
-  --checkpoint=logs/rsl_rl/arclab_1/2026-05-03_15-24-50_rew/model_3000.pt
+  --checkpoint=logs/rsl_rl/arclab_02/2026-05-04_00-06-56_dog/best.pt
+```
+
+By default, play uses the same terrain generator layout as train. For the Bodyflat Arcdog task this keeps the
+configured terrain order, rows, columns, tile size, and initial terrain level from `bodyflat_env_cfg.py`.
+
+The play viewer uses a fixed startup view on the first environment by default. Adjust it with:
+
+```bash
+--play_camera_eye -3.0 -4.0 2.2 --play_camera_lookat 1.2 0.0 0.4
 ```
 
